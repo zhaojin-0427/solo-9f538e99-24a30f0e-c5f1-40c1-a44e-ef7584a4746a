@@ -4,6 +4,7 @@
 - 某一版的完整快照(entries)+ 版本登记(versions)+ 当前版指针(hours.current_version)
   在同一个事务里提交,因此失败或重启都不会暴露"半版"数据。
 - 未确认版本的页面不落库,采集中的残页只存在于内存,重试时整版重取。
+- 所有表以 hour 为第一维:各小时的版本、快照、指针完全独立,互不覆盖。
 """
 from __future__ import annotations
 

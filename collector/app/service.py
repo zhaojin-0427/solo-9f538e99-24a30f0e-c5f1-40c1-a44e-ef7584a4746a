@@ -1,10 +1,11 @@
-"""采集逻辑:先固定源站当前版,再逐版补齐;失败保留原供数版。"""
+"""采集逻辑:按 UTC 小时先固定源站该小时当前版,再逐版补齐;失败只保留该小时原供数版。"""
 from __future__ import annotations
 
 import os
 import threading
 import time
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import httpx
 
@@ -71,9 +72,13 @@ def _get_json(client: httpx.Client, path: str) -> dict:
         raise SourceError(f"invalid JSON from {path}") from e
 
 
-def _check_envelope(pg: dict, version: int, page: int) -> None:
+def _check_envelope(pg: dict, hour: str, version: int, page: int) -> None:
     if not isinstance(pg, dict):
-        raise SourceError(f"version {version} page {page}: response is not an object")
+        raise SourceError(f"hour {hour} version {version} page {page}: response is not an object")
+    if "hour" in pg and pg.get("hour") != hour:
+        raise SourceError(
+            f"hour mismatch for version {version} page {page}: {pg.get('hour')!r} != {hour!r}"
+        )
     if pg.get("version") != version:
         raise SourceError(f"page {page}: version mismatch {pg.get('version')!r} != {version}")
     if pg.get("page") != page:
@@ -102,15 +107,15 @@ def _validate_item(it: object, version: int) -> tuple[str, str, float | None]:
     return sid, "delete", None
 
 
-def _fetch_version(client: httpx.Client, version: int) -> tuple[int, list[dict]]:
-    """整版抓取:每次调用都从第 1 页重新取,绝不沿用上次尝试的残页。"""
-    first = _get_json(client, f"/api/revisions/{version}/pages/1")
-    _check_envelope(first, version, 1)
+def _fetch_version(client: httpx.Client, hour: str, version: int) -> tuple[int, list[dict]]:
+    """整版抓取:始终带 hour,只读该小时自己的版本;每次从第 1 页重取,绝不沿用残页。"""
+    first = _get_json(client, f"/api/revisions/{version}/pages/1?hour={quote(hour)}")
+    _check_envelope(first, hour, version, 1)
     total = first["total_pages"]
     raw = list(first["items"])
     for page in range(2, total + 1):
-        pg = _get_json(client, f"/api/revisions/{version}/pages/{page}")
-        _check_envelope(pg, version, page)
+        pg = _get_json(client, f"/api/revisions/{version}/pages/{page}?hour={quote(hour)}")
+        _check_envelope(pg, hour, version, page)
         if pg["total_pages"] != total:
             raise SourceError(f"version {version}: total_pages changed between pages")
         raw.extend(pg["items"])
@@ -181,9 +186,12 @@ def _collect(hour: str) -> dict:
         prev_current = row["current_version"]
 
         with httpx.Client(base_url=SOURCE_BASE_URL, timeout=PAGE_TIMEOUT) as client:
-            # 1) 先固定源站当前版
+            # 1) 先固定该小时在源站的当前版(只此一次;期间源站发布其他小时或其他修订,
+            #    都不会改变本次采集的目标)
             try:
-                pinned = int(_get_json(client, "/api/revisions/current")["current_version"])
+                pinned = int(
+                    _get_json(client, f"/api/revisions/current?hour={quote(hour)}")["current_version"]
+                )
             except (CollectError, KeyError, TypeError, ValueError) as e:
                 msg = f"pin current version failed: {e}"
                 _mark(db, hour, "failed", msg)
@@ -211,7 +219,7 @@ def _collect(hour: str) -> dict:
                 ok = False
                 for attempt in range(1, MAX_ATTEMPTS + 1):
                     try:
-                        total, items = _fetch_version(client, version)
+                        total, items = _fetch_version(client, hour, version)
                         new_snap = _apply(base, items)
                         # 3) 数据与当前版指针在同一事务生效
                         with dbmod.tx(db):

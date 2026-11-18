@@ -51,7 +51,10 @@ def healthz():
 
 @app.post("/collections")
 def create_collection(req: CollectRequest):
-    """采集某 UTC 小时:先固定源站当前版,再逐版补齐到该版。"""
+    """采集某 UTC 小时:先固定该小时在源站的当前版,再逐版补齐到该版。
+
+    只需指定 hour;其他小时的发布/故障/采集互不影响。
+    """
     hour = _check_hour(req.hour)
     try:
         return service.collect_hour(hour)
